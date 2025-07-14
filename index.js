@@ -2,9 +2,11 @@ require('dotenv').config();
 const express = require('express');
 const OpenAI = require('openai');
 const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -165,7 +167,7 @@ app.post('/reply', async (req, res) => {
     let sessionDone = false;
     let nextQuestion = '';
 
-    if (satisfactoryPercent >= session.completeness) {
+    if (satisfactoryPercent >= session.completeness&&session.probesAsked >= session.numberOfProbes) {
       // User met the satisfactory threshold - session complete successfully
       sessionDone = true;
       nextQuestion = `✅ Thank you, your answer is satisfactory. Session complete. Satisfactory score: ${satisfactoryPercent}%`;
