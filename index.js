@@ -10,12 +10,10 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// In-memory session store
 const sessions = {};
 
 
 
-// Helper: Build OpenAI messages for the probe
 function buildMessages(session) {
   const messages = [
     {
@@ -32,7 +30,6 @@ function buildMessages(session) {
   return messages;
 }
 
-// Start a new probe session
 app.post('/start', (req, res) => {
   const { topic } = req.body;
 
@@ -49,17 +46,14 @@ app.post('/start', (req, res) => {
   res.json({ sessionId, topic });
 });
 
-// User replies to the probe
 app.post('/reply', async (req, res) => {
   const { sessionId, answer } = req.body;
   const session = sessions[sessionId];
   if (!session) return res.status(404).json({ error: 'Session not found' });
   if (session.complete) return res.json({ message: 'Session already complete.' });
 
-  // Add user answer to history
   session.history.push({ user: answer });
 
-  // Build messages for OpenAI
   const messages = buildMessages(session);
 
   try {
@@ -72,7 +66,6 @@ app.post('/reply', async (req, res) => {
     const aiReply = completion.choices[0].message.content;
     session.history[session.history.length - 1].assistant = aiReply;
 
-    // Check if session is complete
     if (aiReply.includes('Session complete')) {
       session.complete = true;
     }
