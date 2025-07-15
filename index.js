@@ -66,6 +66,8 @@ app.post('/start', (req, res) => {
     complete: false,
     probesAsked: 0,
     completenessAchieved: 0,
+    currentQuestionAttempts: 0,
+    currentQuestionIndex: 0,
   };
   res.json({ sessionId, topic, objective, numberOfProbes, completeness });
 });
@@ -109,6 +111,7 @@ IMPORTANT: You should NEVER say "Thank you, your answer is satisfactory" or indi
     // Add the first question to session history (without user response yet)
     session.history.push({ assistant: firstQuestion, user: null });
     session.probesAsked = 1;
+    session.currentQuestionAttempts = 1;
 
     res.json({ 
       sessionId, 
@@ -133,32 +136,119 @@ app.post('/reply', async (req, res) => {
   const lastTurn = session.history[session.history.length - 1];
   const currentQuestion = lastTurn.assistant || '';
 
-  // Add user answer to the last turn
-  lastTurn.user = answer;
-
   console.log(`DEBUG: Current probes asked: ${session.probesAsked}, Max probes: ${session.numberOfProbes}`);
+  console.log(`DEBUG: Current question attempts: ${session.currentQuestionAttempts}`);
 
   try {
-    // First, evaluate the answer against the current question
-    const evaluationMessages = [
+    // First, check if the answer is relevant to the question
+    const relevanceMessages = [
       {
         role: 'system',
-        content: `You are a strict evaluator. Given the assistant's question and the user's response, return a satisfactory percentage from 0 to 100 based on how well the user answered the question. Consider clarity, depth, and relevance. Only respond with a number.`,
+        content: `You are a strict relevance evaluator. Given a question and a user's answer, determine if the answer is relevant to the question. Consider:
+        1. Does the answer address the question directly?
+        2. Is the answer on-topic?
+        3. Does the answer provide meaningful information related to the question?
+        
+        Respond with only "RELEVANT" or "IRRELEVANT".`,
       },
       {
         role: 'user',
-        content: `Assistant's question:\n"${currentQuestion}"\n\nUser's answer:\n"${answer}"\n\nWhat is the satisfactory percentage?`,
+        content: `Question: "${currentQuestion}"\n\nUser's answer: "${answer}"\n\nIs this answer relevant to the question?`,
       },
     ];
 
-    const evaluation = await openai.chat.completions.create({
+    const relevanceCheck = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
-      messages: evaluationMessages,
+      messages: relevanceMessages,
       max_tokens: 10,
       temperature: 0.1,
     });
 
-    const satisfactoryPercent = parseInt(evaluation.choices[0].message.content.trim()) || 0;
+    const isRelevant = relevanceCheck.choices[0].message.content.trim().toUpperCase() === 'RELEVANT';
+    
+    console.log(`DEBUG: Answer relevance: ${isRelevant ? 'RELEVANT' : 'IRRELEVANT'}`);
+
+    // If answer is irrelevant and we haven't reached max attempts, rephrase the question
+    if (!isRelevant && session.currentQuestionAttempts < 5) {
+      session.currentQuestionAttempts += 1;
+      
+      // Generate a rephrased version of the same question
+      const rephraseMessages = [
+        {
+          role: 'system',
+          content: `You are a probing interviewer. The user gave an irrelevant answer to your question. Rephrase the same question in a different way to make it clearer and more specific. The objective is: ${session.objective}. 
+
+IMPORTANT: You should ask the SAME question but with different wording to help the user understand what you're looking for. Do not move to a new question. Make it more specific and clear.`,
+        },
+        {
+          role: 'user',
+          content: `Original question: "${currentQuestion}"\nUser's irrelevant answer: "${answer}"\n\nPlease rephrase the question to make it clearer and more specific.`,
+        },
+      ];
+
+      const rephraseCompletion = await openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: rephraseMessages,
+        max_tokens: 150,
+        temperature: 0.7,
+      });
+
+      const rephrasedQuestion = rephraseCompletion.choices[0].message.content;
+      
+      // Update the current question in history
+      lastTurn.assistant = rephrasedQuestion;
+      lastTurn.user = null; // Reset user response for the rephrased question
+      
+      console.log(`DEBUG: Question rephrased (attempt ${session.currentQuestionAttempts}/5)`);
+      
+      return res.json({
+        nextQuestion: rephrasedQuestion,
+        complete: false,
+        satisfactoryPercent: 0,
+        probesAsked: session.probesAsked,
+        completenessRequired: session.completeness,
+        message: `Please provide a relevant answer to the question. This is attempt ${session.currentQuestionAttempts} of 5.`
+      });
+    }
+
+    // Add user answer to the last turn
+    lastTurn.user = answer;
+
+    let satisfactoryPercent = 0;
+
+    // If answer is relevant, evaluate it properly
+    if (isRelevant) {
+      const evaluationMessages = [
+        {
+          role: 'system',
+          content: `You are a strict evaluator. Given the assistant's question and the user's response, return a satisfactory percentage from 0 to 100 based on:
+          1. How well the user answered the question (relevance: 40%)
+          2. Depth and detail of the answer (30%)
+          3. Clarity and coherence (20%)
+          4. Completeness of the response (10%)
+          
+          Be strict in your evaluation. Only excellent, comprehensive answers should score above 80%. Average answers should score 40-60%. Poor but relevant answers should score 20-40%. Only respond with a number.`,
+        },
+        {
+          role: 'user',
+          content: `Question: "${currentQuestion}"\n\nUser's answer: "${answer}"\n\nWhat is the satisfactory percentage (0-100)?`,
+        },
+      ];
+
+      const evaluation = await openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: evaluationMessages,
+        max_tokens: 10,
+        temperature: 0.1,
+      });
+
+      satisfactoryPercent = parseInt(evaluation.choices[0].message.content.trim()) || 0;
+    } else {
+      // If still irrelevant after 5 attempts, give a low score
+      satisfactoryPercent = 10; // Low score for irrelevant answers
+      console.log('DEBUG: Max attempts reached with irrelevant answer, assigning low score');
+    }
+
     session.completenessAchieved = satisfactoryPercent;
 
     console.log(`DEBUG: Satisfactory percent: ${satisfactoryPercent}, Required: ${session.completeness}`);
@@ -167,7 +257,7 @@ app.post('/reply', async (req, res) => {
     let sessionDone = false;
     let nextQuestion = '';
 
-    if (satisfactoryPercent >= session.completeness&&session.probesAsked >= session.numberOfProbes) {
+    if (satisfactoryPercent >= session.completeness && session.probesAsked >= session.numberOfProbes) {
       // User met the satisfactory threshold - session complete successfully
       sessionDone = true;
       nextQuestion = `✅ Thank you, your answer is satisfactory. Session complete. Satisfactory score: ${satisfactoryPercent}%`;
@@ -191,6 +281,7 @@ app.post('/reply', async (req, res) => {
 
       nextQuestion = completion.choices[0].message.content;
       session.probesAsked += 1;
+      session.currentQuestionAttempts = 1; // Reset attempts for new question
       
       // Add the new question to history (without user response yet)
       session.history.push({ assistant: nextQuestion, user: null });
@@ -204,7 +295,9 @@ app.post('/reply', async (req, res) => {
       complete: sessionDone,
       satisfactoryPercent,
       probesAsked: session.probesAsked,
-      completenessRequired: session.completeness
+      completenessRequired: session.completeness,
+      wasRelevant: isRelevant,
+      attempts: session.currentQuestionAttempts
     });
   } catch (err) {
     res.status(500).json({ error: 'OpenAI error', details: err.message });
