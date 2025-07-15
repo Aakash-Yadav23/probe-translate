@@ -68,6 +68,8 @@ app.post('/start', (req, res) => {
     completenessAchieved: 0,
     currentQuestionAttempts: 0,
     currentQuestionIndex: 0,
+    questionScores: [], // Store individual question scores
+    totalScore: 0, // Running total score
   };
   res.json({ sessionId, topic, objective, numberOfProbes, completeness });
 });
@@ -140,20 +142,30 @@ app.post('/reply', async (req, res) => {
   console.log(`DEBUG: Current question attempts: ${session.currentQuestionAttempts}`);
 
   try {
-    // First, check if the answer is relevant to the question
+    // First, check if the answer is relevant to the question with stricter criteria
     const relevanceMessages = [
       {
         role: 'system',
-        content: `You are a strict relevance evaluator. Given a question and a user's answer, determine if the answer is relevant to the question. Consider:
-        1. Does the answer address the question directly?
-        2. Is the answer on-topic?
-        3. Does the answer provide meaningful information related to the question?
+        content: `You are a very strict relevance evaluator. Given a question and a user's answer, determine if the answer is relevant to the question. Be extremely strict:
         
-        Respond with only "RELEVANT" or "IRRELEVANT".`,
+        1. Does the answer DIRECTLY address the core question being asked?
+        2. Is the answer specific to the topic, not generic or vague?
+        3. Does the answer provide meaningful, substantive information related to the question?
+        4. Reject answers that are too short, generic, or obviously nonsensical
+        5. Reject answers that don't demonstrate understanding of the question
+        
+        Examples of IRRELEVANT answers:
+        - "Yes", "No", "I don't know" without explanation
+        - Random words or gibberish
+        - Answers that completely ignore the question
+        - Generic statements that could apply to anything
+        - Answers shorter than 10 words unless they're genuinely complete
+        
+        Only respond with "RELEVANT" or "IRRELEVANT". Be very strict - when in doubt, mark as IRRELEVANT.`,
       },
       {
         role: 'user',
-        content: `Question: "${currentQuestion}"\n\nUser's answer: "${answer}"\n\nIs this answer relevant to the question?`,
+        content: `Question: "${currentQuestion}"\n\nUser's answer: "${answer}"\n\nIs this answer relevant and substantive enough to merit evaluation?`,
       },
     ];
 
@@ -176,13 +188,13 @@ app.post('/reply', async (req, res) => {
       const rephraseMessages = [
         {
           role: 'system',
-          content: `You are a probing interviewer. The user gave an irrelevant answer to your question. Rephrase the same question in a different way to make it clearer and more specific. The objective is: ${session.objective}. 
+          content: `You are a probing interviewer. The user gave an irrelevant or inadequate answer to your question. Rephrase the same question in a different way to make it clearer and more specific. The objective is: ${session.objective}. 
 
-IMPORTANT: You should ask the SAME question but with different wording to help the user understand what you're looking for. Do not move to a new question. Make it more specific and clear.`,
+IMPORTANT: You should ask the SAME question but with different wording to help the user understand what you're looking for. Do not move to a new question. Make it more specific and clear. Add examples if needed.`,
         },
         {
           role: 'user',
-          content: `Original question: "${currentQuestion}"\nUser's irrelevant answer: "${answer}"\n\nPlease rephrase the question to make it clearer and more specific.`,
+          content: `Original question: "${currentQuestion}"\nUser's irrelevant/inadequate answer: "${answer}"\n\nPlease rephrase the question to make it clearer and more specific.`,
         },
       ];
 
@@ -204,34 +216,49 @@ IMPORTANT: You should ask the SAME question but with different wording to help t
       return res.json({
         nextQuestion: rephrasedQuestion,
         complete: false,
-        satisfactoryPercent: 0,
+        totalScore: Math.round(session.totalScore / Math.max(1, session.questionScores.length)),
         probesAsked: session.probesAsked,
         completenessRequired: session.completeness,
-        message: `Please provide a relevant answer to the question. This is attempt ${session.currentQuestionAttempts} of 5.`
+        message: `Please provide a relevant and detailed answer to the question. This is attempt ${session.currentQuestionAttempts} of 5.`
       });
     }
 
     // Add user answer to the last turn
     lastTurn.user = answer;
 
-    let satisfactoryPercent = 0;
+    let currentQuestionScore = 0;
 
-    // If answer is relevant, evaluate it properly
+    // If answer is relevant, evaluate it properly with stricter criteria
     if (isRelevant) {
       const evaluationMessages = [
         {
           role: 'system',
-          content: `You are a strict evaluator. Given the assistant's question and the user's response, return a satisfactory percentage from 0 to 100 based on:
-          1. How well the user answered the question (relevance: 40%)
-          2. Depth and detail of the answer (30%)
-          3. Clarity and coherence (20%)
-          4. Completeness of the response (10%)
-          
-          Be strict in your evaluation. Only excellent, comprehensive answers should score above 80%. Average answers should score 40-60%. Poor but relevant answers should score 20-40%. Only respond with a number.`,
+          content: `You are an extremely strict evaluator. Given the assistant's question and the user's response, return a satisfactory percentage from 0 to 100. BE VERY STRICT:
+
+Scoring criteria:
+1. Direct relevance to the question (30%)
+2. Depth and detail of the answer (25%)
+3. Accuracy and correctness (20%)
+4. Clarity and coherence (15%)
+5. Completeness of the response (10%)
+
+STRICT GUIDELINES:
+- 90-100: Exceptional, comprehensive, expert-level answers with deep insight
+- 80-89: Very good answers with good depth and accuracy
+- 70-79: Good answers that adequately address the question
+- 60-69: Acceptable answers with basic information
+- 50-59: Weak answers that barely address the question
+- 30-49: Poor answers with minimal relevant content
+- 10-29: Very poor answers with little relevance
+- 0-9: Nonsensical or completely irrelevant answers
+
+Be extremely strict. Most answers should score between 30-70. Only truly exceptional answers deserve 80+. Generic, short, or shallow answers should score low.
+
+Only respond with a number between 0-100.`,
         },
         {
           role: 'user',
-          content: `Question: "${currentQuestion}"\n\nUser's answer: "${answer}"\n\nWhat is the satisfactory percentage (0-100)?`,
+          content: `Question: "${currentQuestion}"\n\nUser's answer: "${answer}"\n\nWhat is the satisfactory percentage (0-100)? Be very strict.`,
         },
       ];
 
@@ -242,30 +269,43 @@ IMPORTANT: You should ask the SAME question but with different wording to help t
         temperature: 0.1,
       });
 
-      satisfactoryPercent = parseInt(evaluation.choices[0].message.content.trim()) || 0;
+      currentQuestionScore = parseInt(evaluation.choices[0].message.content.trim()) || 0;
+      
+      // Additional safety check - if answer is too short or generic, cap the score
+      if (answer.trim().length < 10 || answer.toLowerCase().includes('i don\'t know')) {
+        currentQuestionScore = Math.min(currentQuestionScore, 20);
+      }
     } else {
-      // If still irrelevant after 5 attempts, give a low score
-      satisfactoryPercent = 10; // Low score for irrelevant answers
-      console.log('DEBUG: Max attempts reached with irrelevant answer, assigning low score');
+      // If still irrelevant after attempts, give a very low score
+      currentQuestionScore = 5;
+      console.log('DEBUG: Irrelevant answer after attempts, assigning very low score');
     }
 
-    session.completenessAchieved = satisfactoryPercent;
+    // Store the score for this question
+    session.questionScores.push(currentQuestionScore);
+    
+    // Calculate total score as sum of all scores (not average)
+    session.totalScore = session.questionScores.reduce((sum, score) => sum + score, 0);
 
-    console.log(`DEBUG: Satisfactory percent: ${satisfactoryPercent}, Required: ${session.completeness}`);
+    console.log(`DEBUG: Current question score: ${currentQuestionScore}`);
+    console.log(`DEBUG: All question scores: ${session.questionScores.join(', ')}`);
+    console.log(`DEBUG: Total score: ${session.totalScore}, Required: ${session.completeness * session.numberOfProbes}`);
 
     // Check if session should end
     let sessionDone = false;
     let nextQuestion = '';
 
-    if (satisfactoryPercent >= session.completeness && session.probesAsked >= session.numberOfProbes) {
-      // User met the satisfactory threshold - session complete successfully
+    // Calculate required total score (completeness percentage * number of probes)
+    const requiredTotalScore = session.completeness * session.numberOfProbes;
+
+    if (session.totalScore >= requiredTotalScore && session.probesAsked >= session.numberOfProbes) {
       sessionDone = true;
-      nextQuestion = `✅ Thank you, your answer is satisfactory. Session complete. Satisfactory score: ${satisfactoryPercent}%`;
-      console.log('DEBUG: Session complete - satisfactory score reached');
+      nextQuestion = `✅ Thank you, your answers are satisfactory. Session complete. Total score: ${session.totalScore}/${requiredTotalScore} required.`;
+      console.log('DEBUG: Session complete - satisfactory total score reached');
     } else if (session.probesAsked >= session.numberOfProbes) {
       // User has reached maximum probes but didn't meet threshold - session failed
       sessionDone = true;
-      nextQuestion = `❌ Session ended. You did not meet the satisfactory score of ${session.completeness}%. You achieved ${satisfactoryPercent}%.`;
+      nextQuestion = `❌ Session ended. You did not meet the required total score of ${requiredTotalScore}. You achieved ${session.totalScore} total score.`;
       console.log('DEBUG: Session ended - max probes reached');
     } else {
       // Session continues - generate next question
@@ -293,7 +333,8 @@ IMPORTANT: You should ask the SAME question but with different wording to help t
     res.json({
       nextQuestion,
       complete: sessionDone,
-      satisfactoryPercent,
+      totalScore: session.totalScore,
+      requiredTotalScore: requiredTotalScore,
       probesAsked: session.probesAsked,
       completenessRequired: session.completeness,
       wasRelevant: isRelevant,
