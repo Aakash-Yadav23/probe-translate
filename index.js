@@ -41,11 +41,28 @@ IMPORTANT: You should NEVER say "Thank you, your answer is satisfactory" or indi
 }
 
 app.post('/start', (req, res) => {
-  const { topic, objective, numberOfProbes, completeness, firstQuestion } = req.body;
+  const { topic, objective, numberOfProbes,priority,questionNumber, completeness, firstQuestion } = req.body;
+
+  let priorityVise="completeness"|"probes";
+  if(priority==="completeness"){
+    priorityVise="completeness";
+  }else{
+    priorityVise="probes";
+  }
 
   if (!topic) {
     return res.json({ message: 'topic needed.' });
   }
+
+  if (!questionNumber) {
+    return res.json({ message: 'questionNumber needed.' });
+  }
+
+  if (!priority) {
+    return res.json({ message: 'priority needed.' });
+  }
+
+  
   if (!objective) {
     return res.json({ message: 'objective needed.' });
   }
@@ -72,11 +89,13 @@ app.post('/start', (req, res) => {
     completenessAchieved: 0,
     currentQuestionAttempts: 1,
     currentQuestionIndex: 0,
+    priority:priorityVise,
+    questionNumber,
     questionScores: [], // Store individual question scores
     totalScore: 0, // Running total score
     respondentId, // Store respondentId
   };
-  res.json({ sessionId, respondentId, topic, objective, numberOfProbes, completeness });
+  res.json({ sessionId, respondentId, topic, objective,questionNumber,priority, numberOfProbes, completeness });
 });
 
 app.post('/start-probe', async (req, res) => {
@@ -99,6 +118,8 @@ app.post('/start-probe', async (req, res) => {
       topic: session.topic,
       objective: session.objective,
       numberOfProbes: session.numberOfProbes,
+      questionNumber: session.questionNumber,
+      priority: session.priority,
       completeness: session.completeness,
       firstQuestion: session.history[0].assistant
     });
@@ -198,7 +219,13 @@ app.post('/reply', async (req, res) => {
     console.log(`DEBUG: Answer relevance: ${isRelevant ? 'RELEVANT' : 'IRRELEVANT'}`);
 
     // If answer is irrelevant and we haven't reached max attempts, rephrase the question
-    if (!isRelevant) {
+    if (
+      !isRelevant &&
+      (
+        (session.priority === "probes" && session.currentQuestionAttempts < 5) ||
+        (session.priority !== "probes")
+      )
+    ) {
       session.currentQuestionAttempts += 1;
       
       // Generate a rephrased version of the same question
@@ -315,7 +342,7 @@ Only respond with a number between 0-100.`,
     // Calculate required total score (completeness percentage * number of probes)
     const requiredTotalScore = session.completeness;
 
-    if (session.totalScore >= requiredTotalScore) {
+    if (session.totalScore >= requiredTotalScore&&session.priority==="completeness"||session.probesAsked>=session.numberOfProbes&&session.priority==="probes") {
       sessionDone = true;
       nextQuestion = `✅ Thank you, your answers are satisfactory. Session complete. Total score: ${session.totalScore}/${requiredTotalScore} required.`;
       console.log('DEBUG: Session complete - satisfactory total score reached');
@@ -361,6 +388,26 @@ Only respond with a number between 0-100.`,
   } catch (err) {
     res.status(500).json({ error: 'OpenAI error', details: err.message });
   }
+});
+
+app.get('/session/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const session = sessions[sessionId];
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+  res.json({ sessionId, ...session });
+});
+
+app.get('/session/respondent/:respondentId', (req, res) => {
+  const { respondentId } = req.params;
+  const sessionId = Object.keys(sessions).find(
+    (id) => sessions[id].respondentId === respondentId
+  );
+  if (!sessionId) {
+    return res.status(404).json({ error: 'Session not found for respondentId' });
+  }
+  res.json({ sessionId, ...sessions[sessionId] });
 });
 
 const PORT = process.env.PORT || 3000;
