@@ -198,7 +198,7 @@ app.post('/reply', async (req, res) => {
     console.log(`DEBUG: Answer relevance: ${isRelevant ? 'RELEVANT' : 'IRRELEVANT'}`);
 
     // If answer is irrelevant and we haven't reached max attempts, rephrase the question
-    if (!isRelevant && session.currentQuestionAttempts < 5) {
+    if (!isRelevant) {
       session.currentQuestionAttempts += 1;
       
       // Generate a rephrased version of the same question
