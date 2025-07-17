@@ -41,7 +41,7 @@ IMPORTANT: You should NEVER say "Thank you, your answer is satisfactory" or indi
 }
 
 app.post('/start', (req, res) => {
-  const { topic, objective, numberOfProbes, completeness } = req.body;
+  const { topic, objective, numberOfProbes, completeness, firstQuestion } = req.body;
 
   if (!topic) {
     return res.json({ message: 'topic needed.' });
@@ -55,23 +55,28 @@ app.post('/start', (req, res) => {
   if (!completeness || isNaN(completeness) || completeness < 1 || completeness > 100) {
     return res.json({ message: 'Valid completeness percentage (1-100) needed.' });
   }
+  if (!firstQuestion || typeof firstQuestion !== 'string' || firstQuestion.trim() === '') {
+    return res.json({ message: 'firstQuestion needed.' });
+  }
 
   const sessionId = uuidv4();
+  const respondentId = uuidv4();
   sessions[sessionId] = {
     topic,
     objective,
     numberOfProbes: Number(numberOfProbes),
     completeness: Number(completeness),
-    history: [],
+    history: [{ assistant: firstQuestion, user: null }], // Store first question
     complete: false,
-    probesAsked: 0,
+    probesAsked: 1, // First probe already asked
     completenessAchieved: 0,
-    currentQuestionAttempts: 0,
+    currentQuestionAttempts: 1,
     currentQuestionIndex: 0,
     questionScores: [], // Store individual question scores
     totalScore: 0, // Running total score
+    respondentId, // Store respondentId
   };
-  res.json({ sessionId, topic, objective, numberOfProbes, completeness });
+  res.json({ sessionId, respondentId, topic, objective, numberOfProbes, completeness });
 });
 
 app.post('/start-probe', async (req, res) => {
@@ -86,14 +91,25 @@ app.post('/start-probe', async (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
+  // If the session already has a first question in history, return it
+  if (session.history && session.history.length > 0 && session.history[0].assistant) {
+    return res.json({
+      sessionId,
+      respondentId: session.respondentId,
+      topic: session.topic,
+      objective: session.objective,
+      numberOfProbes: session.numberOfProbes,
+      completeness: session.completeness,
+      firstQuestion: session.history[0].assistant
+    });
+  }
+
   try {
     // Generate first question based on topic and objective
     const firstQuestionMessages = [
       {
         role: 'system',
-        content: `You are a probing interviewer. Your goal is to ask follow-up questions about the given topic until you are satisfied with the depth and quality of the user's answer. The objective is: ${session.objective}. 
-
-IMPORTANT: You should NEVER say "Thank you, your answer is satisfactory" or indicate completion. Your job is only to ask probing questions. The system will determine when the session is complete based on evaluation criteria. Ask an initial question to start the conversation. Do not answer the question yourself.`,
+        content: `You are a probing interviewer. Your goal is to ask follow-up questions about the given topic until you are satisfied with the depth and quality of the user's answer. The objective is: ${session.objective}. \n\nIMPORTANT: You should NEVER say "Thank you, your answer is satisfactory" or indicate completion. Your job is only to ask probing questions. The system will determine when the session is complete based on evaluation criteria. Ask an initial question to start the conversation. Do not answer the question yourself.`,
       },
       {
         role: 'user',
@@ -111,12 +127,13 @@ IMPORTANT: You should NEVER say "Thank you, your answer is satisfactory" or indi
     const firstQuestion = completion.choices[0].message.content;
     
     // Add the first question to session history (without user response yet)
-    session.history.push({ assistant: firstQuestion, user: null });
+    session.history = [{ assistant: firstQuestion, user: null }];
     session.probesAsked = 1;
     session.currentQuestionAttempts = 1;
 
     res.json({ 
       sessionId, 
+      respondentId: session.respondentId,
       topic: session.topic, 
       objective: session.objective, 
       numberOfProbes: session.numberOfProbes, 
@@ -296,9 +313,9 @@ Only respond with a number between 0-100.`,
     let nextQuestion = '';
 
     // Calculate required total score (completeness percentage * number of probes)
-    const requiredTotalScore = session.completeness * session.numberOfProbes;
+    const requiredTotalScore = session.completeness;
 
-    if (session.totalScore >= requiredTotalScore && session.probesAsked >= session.numberOfProbes) {
+    if (session.totalScore >= requiredTotalScore) {
       sessionDone = true;
       nextQuestion = `✅ Thank you, your answers are satisfactory. Session complete. Total score: ${session.totalScore}/${requiredTotalScore} required.`;
       console.log('DEBUG: Session complete - satisfactory total score reached');
@@ -332,6 +349,7 @@ Only respond with a number between 0-100.`,
 
     res.json({
       nextQuestion,
+      respondentId: session.respondentId,
       complete: sessionDone,
       totalScore: session.totalScore,
       requiredTotalScore: requiredTotalScore,
